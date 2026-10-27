@@ -1,0 +1,83 @@
+# Local Airflow stack for the OpenAQ pipeline (LocalExecutor, no Celery).
+# All secrets come from airflow/.env (gitignored; see .env.example) — this
+# file contains no credentials.
+x-airflow-common: &airflow-common
+  build: .
+  # Loads OPENAQ_API_KEY / AZURE_* / DATABRICKS_* into the containers so the
+  # DAG can forward them to the ingestion container and the Databricks
+  # connection URI below can be substituted. Optional so `docker compose
+  # config`/build work before .env exists.
+  env_file:
+    - path: .env
+      required: false
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    # Databricks connection assembled from env; the token is never stored here.
+    # DATABRICKS_HOST must be the workspace hostname without https:// prefix.
+    AIRFLOW_CONN_DATABRICKS_DEFAULT: databricks://:${DATABRICKS_TOKEN:-}@${DATABRICKS_HOST:-}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
+          --firstname local --lastname dev \
+          --role Admin --email admin@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    # Host port overridable via AIRFLOW_WEBSERVER_PORT if 8080 is taken.
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    command: webserver
+
+  airflow-scheduler:
+    <<: *airflow-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: scheduler
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      # DockerOperator launches openaq-ingestion:dev on the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres-db-volume:

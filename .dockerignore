@@ -1,0 +1,24 @@
+# Secrets and local state never enter the build context
+.env
+.env.*
+!.env.example
+.state/
+.venv/
+
+# VCS and tooling
+.git/
+.pytest_cache/
+.kimi*
+
+# Caches and OS artifacts
+__pycache__/
+**/__pycache__/
+.DS_Store
+
+# Not part of the application image
+docs/
+notebooks/
+spark/
+tests/
+*.zip
+*.ipynb_checkpoints/

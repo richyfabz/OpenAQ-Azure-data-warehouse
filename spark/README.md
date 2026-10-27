@@ -1,0 +1,1 @@
+Databricks notebooks are the current validated transformation source. Refactor notebook logic here after validation. Historical, unverified Spark scripts are retained under `archive/legacy_spark/` for reference only.

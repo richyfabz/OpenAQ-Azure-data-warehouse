@@ -1,0 +1,57 @@
+bundle:
+  name: openaq-databricks
+
+# Only the transformation package ships to the workspace; no .git here, so be explicit.
+sync:
+  include:
+    - spark/**
+  exclude:
+    - spark/**/__pycache__/**
+    - spark/.DS_Store
+
+variables:
+  catalog:
+    description: Unity Catalog holding the bronze/silver/gold schemas (override per environment)
+    default: workspace
+
+resources:
+  jobs:
+    openaq_medallion_pipeline:
+      name: openaq_medallion_pipeline
+      max_concurrent_runs: 1
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
+      tasks:
+        - task_key: bronze
+          environment_key: default
+          spark_python_task:
+            python_file: ${workspace.file_path}/spark/runners/run_bronze.py
+            parameters:
+              - --package-root=${workspace.file_path}
+              - --catalog=${var.catalog}
+        - task_key: silver
+          environment_key: default
+          depends_on:
+            - task_key: bronze
+          spark_python_task:
+            python_file: ${workspace.file_path}/spark/runners/run_silver.py
+            parameters:
+              - --package-root=${workspace.file_path}
+              - --catalog=${var.catalog}
+        - task_key: gold
+          environment_key: default
+          depends_on:
+            - task_key: silver
+          spark_python_task:
+            python_file: ${workspace.file_path}/spark/runners/run_gold.py
+            parameters:
+              - --package-root=${workspace.file_path}
+              - --catalog=${var.catalog}
+
+targets:
+  dev:
+    default: true
+    workspace:
+      profile: openaq
