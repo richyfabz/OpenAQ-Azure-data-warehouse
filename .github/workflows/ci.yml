@@ -31,7 +31,7 @@ jobs:
       - uses: databricks/setup-cli@main
       - name: Validate bundle
         env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_HOST: https://adb-7405608152735347.7.azuredatabricks.net
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: databricks bundle validate -t dev
 
