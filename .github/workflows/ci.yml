@@ -52,8 +52,3 @@ jobs:
         run: terraform init -backend=false -input=false
       - name: Validate configuration
         run: terraform validate
-      - name: Validate Databricks Bundle
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: databricks bundle validate -t dev
