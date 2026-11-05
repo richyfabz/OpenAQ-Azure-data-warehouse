@@ -5,7 +5,7 @@ from uuid import uuid4
 from config.backfill import BACKFILL_END, BACKFILL_START, BACKFILL_WINDOW_DAYS
 from config.source_scope import TARGET_LOCATIONS, TARGET_SENSOR_IDS
 from ingestion.client import OpenAQClient
-from ingestion.storage import RawWriter, backfill_state, watermark_state
+from ingestion.storage import VolumeRawWriter, backfill_state, watermark_state
 
 
 def land_metadata(client, writer, batch_id: str, ingestion_date: date):
@@ -68,11 +68,21 @@ def land_metadata(client, writer, batch_id: str, ingestion_date: date):
     return counts
 
 
-def land_measurement_window(client, writer, sensor_id, start, end, batch_id):   # Partition Raw files by sensor and window start for traceability.
-    directory = (
-        f"measurements/sensor_id={sensor_id}/year={start.year}/"
-        f"month={start.month:02d}/day={start.day:02d}"
+def measurement_partition(entity, sensor_id, start):
+    """Return the Raw contract partition for a measurement window start.
+
+    Raw measurements use week-of-month directories, anchored on the first day
+    of each seven-day bucket: 01, 08, 15, 22, and 29.
+    """
+    week_start_day = ((start.day - 1) // 7) * 7 + 1
+    return (
+        f"{entity}/sensor_id={sensor_id}/year={start.year}/"
+        f"month={start.month:02d}/day={week_start_day:02d}"
     )
+
+
+def land_measurement_window(client, writer, sensor_id, start, end, batch_id):   # Partition Raw files by sensor and window start for traceability.
+    directory = measurement_partition("measurements", sensor_id, start)
     count = 0
     for page, payload in enumerate(client.measurements(sensor_id, start, end), 1):   # Preserve complete source pages; validation and deduplication occur later.
         writer.write_json(
@@ -195,7 +205,7 @@ def main(argv=None):             # Route CLI commands to the appropriate Raw ing
 
         return
 
-    client, writer = OpenAQClient(), RawWriter()        # Delay external client creation until a command needs API/Azure access.
+    client, writer = OpenAQClient(), VolumeRawWriter()  # Raw writes go through the same Databricks volume read by the contract gate.
     now = datetime.now(timezone.utc)
     batch_id = (f"{args.mode}_{now:%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}")  # Identify each ingestion attempt for Raw lineage and troubleshooting.
 
@@ -220,6 +230,7 @@ def main(argv=None):             # Route CLI commands to the appropriate Raw ing
         if args.sensor_id is not None and args.sensor_id not in TARGET_SENSOR_IDS:
             parser.error("Sensor ID is outside the configured source scope")
 
+        print(f"Batch: {batch_id}")
         run_backfill(client, writer, backfill_state(), sensor_ids, start, end, batch_id, BACKFILL_WINDOW_DAYS)
 
     else:

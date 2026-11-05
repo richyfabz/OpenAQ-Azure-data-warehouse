@@ -25,6 +25,7 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+landing/
 
 # Logs
 *.log
@@ -59,3 +60,4 @@ temp/
 .terraform/
 *.tfstate
 *.tfstate.backup
+landing/

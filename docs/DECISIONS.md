@@ -36,6 +36,9 @@ Agreed architecture and modeling decisions. Sources: `KIMI_OPENAQ_PROJECT_HANDOV
 | 27 | Pipeline state (backfill checkpoints, watermarks) is backend-switchable: `LocalStateBackend` (`.state/` JSON, current behavior) is the dev default; `VolumeStateBackend` persists the same JSON to the ADLS prefix `openaq_state/` backing `/Volumes/workspace/raw/openaq_state/`, selected via `OPENAQ_STATE_BACKEND=local|volume` | settled | implemented 2026-10-25 in `ingestion/state_backends.py`; state files are overwritten in place (checkpoints, not immutable Raw); the dedicated prefix keeps state out of the contract-gated `openaq_landing/` tree; volume backend creates the prefix if missing and fails loudly on write failure; **exercised in a real containerized landing 2026-10-26** (batch `backfill_20261026T092318Z_f85a1445`, state JSON verified in ADLS, local `.state/` untouched). Cloud state is independent of local `.state/` history — it starts empty on first volume-mode use |
 | 28 | Terraform observes existing Azure resources this phase; imports deferred | settled 2026-10-25 | `infra/terraform/` declares the RG, storage account and workspace as `data` sources only (`plan` = zero changes expected); import blocks stay commented in `main.tf` until each resource's live config is fully captured in HCL and reviewed — a premature import/apply risks forced recreation of the storage account backing the Raw volume |
 | 29 | Test baseline: 11 → 15 (Phase 3 packaging tests) → **23 passed** (Phase 4 state-backend tests) | settled 2026-10-25 | 11 ingestion + 4 spark packaging + 8 state-backend tests; any doc still citing 11 as the current baseline is stale |
+| 30 | Raw transport = Databricks Files API to the UC volume `/Volumes/workspace/raw/openaq_landing` | settled 2026-11-03 | The volume is the single Raw source of truth; `VolumeRawWriter` uses the Databricks SDK Files API, while the ADLS SDK is retired for Raw writes. Two unlinked storage references caused the recurring written-but-invisible failures: ADLS writer output was not visible to the volume-backed contract gate. Free Edition cannot mount external volumes, so the Files API is the correct volume-native transport; landed therefore equals visible by construction. |
+| 31 | Raw transport v3 = stage-and-land: CLI → DBFS staging → `06_stage_landing` → UC volume | settled 2026-11-04 | Free Edition volume writes from local clients are not Spark-visible; DBFS staging is the namespace shared by local clients and notebooks. `VolumeRawWriter` stages only; notebook 06 performs the in-platform `dbutils.fs.cp` into `/Volumes/workspace/raw/openaq_landing` and verifies/deletes each staged file. On paid tiers, direct Files-API volume writes can replace staging behind one flag without changing downstream paths. |
+| 32 | Raw transport v4 = local CLI landing with manual UI upload on Free Edition | settled 2026-11-04 | Production writer runs in-platform as a serverless bundle job task once the organization API block lifts. Until then, the local CLI writes `./landing/<contract-relative-path>` and the user uploads that tree through the Catalog UI before running notebook 06. Four-namespace saga:<br>- ADLS/ADLS SDK writes were not Spark-visible.<br>- DBFS staging was rejected because public DBFS root is disabled.<br>- Workspace Files API paths were rejected for `/Workspace/...` and `/Users/...`.<br>- Files API `/Volumes/...` uploads succeeded and downloaded but remained invisible to `dbutils.fs.ls`/Spark on Free Edition.<br>Paid tiers may enable direct Files-API volume writes behind a flag. |
 
 ## Gold modeling
 
@@ -60,3 +63,21 @@ Agreed architecture and modeling decisions. Sources: `KIMI_OPENAQ_PROJECT_HANDOV
 
 Rules: no revisiting settled decisions without new evidence; every open decision needs a
 recorded resolution here once made.
+
+## Phase 5 / CI platform block
+
+- CI marks the Databricks Bundle validation step `continue-on-error` **only** for the
+  documented Free Edition org API block. The workflow retains the real validation command
+  and emits an explicit `PLATFORM-BLOCKED` line; revert to strict failure as soon as the
+  org API block lifts.
+- A production-grade alternative is recorded for later: GitHub OIDC → Azure token exchange,
+  requiring an app registration. This is deferred as overkill for the Free Edition portfolio.
+- Airflow is the sole scheduler for the end-to-end flow once active; do not create duplicate
+  Databricks schedules. DAGs stay thin: transformations remain in `spark/` + Databricks and
+  extraction remains in `ingestion/`.
+- Environments are promoted through bundle variables for catalog plus Bronze/Silver/Gold
+  schemas. Dev keeps `workspace.bronze/silver/gold`; UAT uses `uat_bronze`, `uat_silver`,
+  and `uat_gold` in the same Free Edition workspace as an explicit schema separation.
+- The Gold publish gate writes `etl_run_audit` and the singleton `publish_watermark` only
+  after every existing Gold assertion passes. Power BI consumes only the `bi_*` views and
+  reads `publish_watermark` for freshness; no downstream consumer bypasses the gate.

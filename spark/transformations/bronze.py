@@ -424,10 +424,15 @@ def _check_required_parameters(bronze_parameters: DataFrame) -> None:
     )
 
 
-def build_bronze(spark: SparkSession, raw_root: str, catalog: str = "workspace") -> dict[str, int]:
+def build_bronze(
+    spark: SparkSession,
+    raw_root: str,
+    catalog: str = "workspace",
+    bronze_schema: str = "bronze"
+) -> dict[str, int]:
     """Run the full Raw → Bronze write path and return {table_name: persisted_row_count}."""
-    bronze_namespace = f"`{catalog}`.`bronze`"
-    bronze_measurements_table = f"{catalog}.bronze.measurements"
+    bronze_namespace = f"`{catalog}`.`{bronze_schema}`"
+    bronze_measurements_table = f"{catalog}.{bronze_schema}.measurements"
 
     _validate_sources(raw_root, bronze_namespace)
 
@@ -446,7 +451,7 @@ def build_bronze(spark: SparkSession, raw_root: str, catalog: str = "workspace")
     normalized_metadata = _normalize_metadata(raw_metadata)
     bronze_metadata = _build_bronze_metadata(normalized_metadata)
     counts.update(
-        _persist_bronze_metadata(spark, bronze_metadata, f"{catalog}.bronze")
+        _persist_bronze_metadata(spark, bronze_metadata, f"{catalog}.{bronze_schema}")
     )
     _check_required_parameters(bronze_metadata["parameters"])
 

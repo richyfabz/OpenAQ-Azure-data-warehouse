@@ -7,6 +7,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run the Silver to Gold transformation")
     parser.add_argument("--package-root", required=True, help="Bundle files path containing the spark package")
     parser.add_argument("--catalog", default="workspace")
+    parser.add_argument("--bronze-schema", default="bronze")
+    parser.add_argument("--silver-schema", default="silver")
+    parser.add_argument("--gold-schema", default="gold")
     return parser.parse_args(argv)
 
 
@@ -20,7 +23,13 @@ def main(argv=None):
     from spark.transformations.gold import build_gold
 
     spark = SparkSession.builder.getOrCreate()
-    counts = build_gold(spark, args.catalog)
+    counts = build_gold(
+        spark,
+        args.catalog,
+        bronze_schema=args.bronze_schema,
+        silver_schema=args.silver_schema,
+        gold_schema=args.gold_schema,
+    )
 
     for table, count in counts.items():
         print(f"{table}: {count:,} rows")

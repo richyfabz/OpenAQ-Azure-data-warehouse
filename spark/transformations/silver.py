@@ -28,14 +28,19 @@ def _latest_by_key(dataframe: DataFrame, key: str) -> DataFrame:
     )  # Keep one current record while Bronze retains the full history
 
 
-def build_silver(spark: SparkSession, catalog: str = "workspace") -> dict[str, int]:
+def build_silver(
+    spark: SparkSession,
+    catalog: str = "workspace",
+    bronze_schema: str = "bronze",
+    silver_schema: str = "silver",
+) -> dict[str, int]:
     """Build and persist the Silver layer from persisted Bronze tables.
 
     Returns a mapping of each written Silver table name to its persisted
     row count, verified by re-reading the managed Delta table.
     """
-    BRONZE_NAMESPACE = f"{catalog}.bronze"  # Read committed Bronze tables instead of accessing ADLS directly
-    SILVER_NAMESPACE = f"{catalog}.silver"  # Keep Silver datasets isolated from Bronze
+    BRONZE_NAMESPACE = f"{catalog}.{bronze_schema}"  # Read committed Bronze tables instead of accessing ADLS directly
+    SILVER_NAMESPACE = f"{catalog}.{silver_schema}"  # Keep Silver datasets isolated from Bronze
 
     ENTITIES = [
         "countries",

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 import hashlib
 import json
@@ -8,10 +9,16 @@ import pytest
 
 from ingestion.client import OpenAQClient
 from ingestion.pipeline import (
-    build_windows, land_measurement_window, land_metadata,
+    build_windows, land_measurement_window, land_metadata, measurement_partition,
     run_backfill, run_incremental,
 )
-from ingestion.storage import BackfillState, WatermarkState
+from ingestion.storage import (
+    BackfillState,
+    VolumeRawWriter,
+    WatermarkState,
+    validate_dbfs_staging_root,
+    validate_volume_root,
+)
 
 START = datetime(2026, 9, 1, tzinfo=timezone.utc)
 END = datetime(2026, 9, 2, tzinfo=timezone.utc)
@@ -37,6 +44,159 @@ def test_backfill_checkpoints_only_after_complete_raw_landing():
     run_backfill(client, writer, state, [SENSOR_ID], START, END, "batch", 1)
     writer.write_json.assert_called_once()
     state.mark_complete.assert_called_once_with(SENSOR_ID, START, END, 1, "batch")
+
+
+def test_measurement_partition_uses_contract_week_of_month_path():
+    client, writer = Mock(), Mock()
+    client.measurements.return_value = iter([PAYLOAD])
+    start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    batch_id = "backfill_20261101T131513Z_b8eb92da"
+
+    assert measurement_partition("measurements", SENSOR_ID, start) == (
+        "measurements/sensor_id=12234787/year=2026/month=09/day=01"
+    )
+    land_measurement_window(client, writer, SENSOR_ID, start, END, batch_id)
+
+    writer.write_json.assert_called_once()
+    assert writer.write_json.call_args.args[:5] == (
+        PAYLOAD,
+        "measurements/sensor_id=12234787/year=2026/month=09/day=01",
+        "measurements",
+        batch_id,
+        "page_0001",
+    )
+    assert writer.write_json.call_args.args[5]["window_start"] == start.isoformat()
+
+
+def test_volume_root_validation_requires_uc_volume_path():
+    assert validate_volume_root("/Volumes/workspace/raw/openaq_landing/") == (
+        "/Volumes/workspace/raw/openaq_landing"
+    )
+    with pytest.raises(ValueError):
+        validate_volume_root("measurements/sensor_id=12234787")
+    with pytest.raises(ValueError):
+        validate_volume_root("/Volumes/workspace/raw")
+    with pytest.raises(ValueError):
+        validate_volume_root("/Volumes/workspace/raw/other_volume")
+    with pytest.raises(ValueError):
+        validate_volume_root("dbfs:/Volumes/workspace/raw/openaq_landing")
+    assert validate_dbfs_staging_root("dbfs:/openaq_staging/") == "dbfs:/openaq_staging"
+    with pytest.raises(ValueError):
+        validate_dbfs_staging_root("/Volumes/workspace/raw/openaq_landing")
+
+
+def test_landing_mode_rejects_unknown_value():
+    with pytest.raises(ValueError, match="OPENAQ_LANDING_MODE"):
+        VolumeRawWriter(landing_mode="dbfs")
+
+
+def test_volume_raw_writer_stages_exact_contract_path_and_envelope(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 3, 12, 34, 56, 789000, tzinfo=tz)
+
+    uploaded = {}
+    files = Mock()
+    files.upload.side_effect = lambda path, data, overwrite: uploaded.update(
+        path=path, data=data, overwrite=overwrite
+    )
+    workspace = SimpleNamespace(files=files)
+    monkeypatch.setattr(storage, "datetime", FixedDatetime)
+    monkeypatch.setattr(storage, "uuid4", lambda: SimpleNamespace(hex="0123456789abcdef"))
+
+    writer = VolumeRawWriter(landing_mode="volume", workspace_client=workspace)
+    path = writer.write_json(
+        PAYLOAD,
+        "measurements/sensor_id=12234787/year=2026/month=09/day=01",
+        "measurements",
+        "backfill_20261101T131513Z_b8eb92da",
+        "page_0001",
+        {"sensor_id": SENSOR_ID},
+    )
+
+    expected_path = (
+        "/Volumes/workspace/raw/openaq_landing/measurements/"
+        "sensor_id=12234787/year=2026/month=09/day=01/"
+        "page_0001_20261103T123456789000Z_01234567.json"
+    )
+    assert path == expected_path
+    assert uploaded["path"] == expected_path
+    assert uploaded["overwrite"] is False
+    envelope = json.loads(uploaded["data"])
+    assert envelope["source_payload"] == PAYLOAD
+    assert envelope["ingestion"]["batch_id"] == "backfill_20261101T131513Z_b8eb92da"
+    assert envelope["ingestion"]["source_file"] == expected_path.rsplit("/", 1)[1]
+
+
+def test_volume_raw_writer_propagates_upload_failure():
+    files = Mock()
+    files.upload.side_effect = RuntimeError("Files API upload failed")
+    workspace = SimpleNamespace(files=files)
+    writer = VolumeRawWriter(landing_mode="volume", workspace_client=workspace)
+
+    with pytest.raises(RuntimeError, match="Files API upload failed"):
+        writer.write_json(
+            PAYLOAD,
+            "measurements/sensor_id=12234787/year=2026/month=09/day=01",
+            "measurements",
+            "batch",
+            "page_0001",
+        )
+
+
+def test_local_writer_writes_contract_layout_envelope_and_checksum(tmp_path, monkeypatch, capsys):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 4, 12, 34, 56, 789000, tzinfo=tz)
+
+    monkeypatch.setattr(storage, "datetime", FixedDatetime)
+    monkeypatch.setattr(storage, "uuid4", lambda: SimpleNamespace(hex="0123456789abcdef"))
+    writer = VolumeRawWriter(landing_mode="local", local_root=tmp_path / "landing")
+
+    path = writer.write_json(
+        PAYLOAD,
+        "measurements/sensor_id=12234787/year=2026/month=09/day=01",
+        "measurements",
+        "batch-local",
+        "page_0001",
+        {"sensor_id": SENSOR_ID},
+    )
+
+    expected_path = (tmp_path / "landing/measurements/sensor_id=12234787/year=2026/month=09/day=01/page_0001_20261104T123456789000Z_01234567.json").resolve()
+    assert path == str(expected_path)
+    envelope = json.loads(expected_path.read_text())
+    expected_sha = hashlib.sha256(json.dumps(PAYLOAD, separators=(",", ":")).encode()).hexdigest()
+    assert envelope["source_payload"] == PAYLOAD
+    assert envelope["ingestion"]["batch_id"] == "batch-local"
+    assert envelope["ingestion"]["sha256"] == expected_sha
+    output = capsys.readouterr().out
+    assert str(expected_path) in output
+    assert "batch-local" in output
+    assert expected_sha in output
+
+
+def test_local_writer_never_overwrites(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "uuid4", lambda: SimpleNamespace(hex="0123456789abcdef"))
+    writer = VolumeRawWriter(landing_mode="local", local_root=tmp_path / "landing")
+    args = (PAYLOAD, "measurements/sensor_id=12234787/year=2026/month=09/day=01", "measurements", "batch", "page_0001")
+    first = writer.write_json(*args)
+    second = writer.write_json(*args)
+    assert first != second
+    first_envelope = json.loads(open(first).read())
+    second_envelope = json.loads(open(second).read())
+    assert first_envelope["source_payload"] == second_envelope["source_payload"] == PAYLOAD
+    assert first_envelope["ingestion"]["sha256"] == second_envelope["ingestion"]["sha256"]
+
+
+def test_measurement_land_path_has_no_storage_account_or_filesystem_reference():
+    client, writer = Mock(), Mock()
+    client.measurements.return_value = iter([PAYLOAD])
+    land_measurement_window(client, writer, SENSOR_ID, START, END, "batch")
+    directory = writer.write_json.call_args.args[1]
+    assert "openaqdataplatform" not in directory
+    assert "/raw/" not in f"/{directory}/"
 
 
 def test_backfill_failure_does_not_commit_checkpoint():

@@ -15,12 +15,36 @@ pip install -r requirements.txt
 cp .env.example .env               # then fill in real values; NEVER commit .env
 ```
 
-Required environment variables (see `.env.example`): `OPENAQ_API_KEY`, `OPENAQ_BASE_URL`,
-`AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_RAW_FILE_SYSTEM` (default `raw`), plus
-`AZURE_BRONZE_FILE_SYSTEM`/`AZURE_SILVER_FILE_SYSTEM` reserved for later layers.
-Azure authentication uses `DefaultAzureCredential` (e.g. `az login`).
+Required environment variables (see `.env.example`): `OPENAQ_API_KEY`, `OPENAQ_BASE_URL`, and
+`OPENAQ_RAW_VOLUME_ROOT` (default `/Volumes/workspace/raw/openaq_landing`). Local Files API
+authentication uses the `openaq` Databricks profile; containers use `DATABRICKS_HOST` and
+`DATABRICKS_TOKEN`. `AZURE_STORAGE_ACCOUNT_NAME` and `AZURE_RAW_FILE_SYSTEM` are deprecated
+for Raw writes and retained only for backward-compatible state-backend operation.
 
-## 2. Tests (offline, no Azure/Spark needed)
+## 2. Local Airflow orchestration
+
+The Phase 5 DAG lives at `airflow/dags/openaq_pipeline.py` and is intentionally thin:
+`ingest_raw` runs a bounded backfill in `openaq-ingestion:dev`, then
+`run_transformations` triggers the bundle job `openaq_medallion_pipeline` through the
+Databricks API. Airflow is the sole end-to-end scheduler once this flow is enabled.
+
+Bring up and inspect the local stack (from the repository root):
+
+```bash
+cp airflow/.env.example airflow/.env       # fill runtime values; never commit it
+docker compose -f airflow/docker-compose.yaml up -d --build
+docker compose -f airflow/docker-compose.yaml exec airflow-webserver airflow dags list
+docker compose -f airflow/docker-compose.yaml exec airflow-webserver airflow dags show openaq_pipeline
+docker compose -f airflow/docker-compose.yaml down
+```
+
+The Compose file assembles `databricks_default` from runtime environment variables; no
+Databricks token is stored in the DAG, Compose file, or image. Set `DATABRICKS_HOST` as the
+workspace hostname and `DATABRICKS_TOKEN` in the ignored `airflow/.env`. The pending integration
+test is a bounded `ingest_raw` run followed by `run_transformations`; do not trigger it until
+the documented org API block is lifted. Local parse/list validation does not call Databricks.
+
+## 3. Tests (offline, no Azure/Spark needed)
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -28,9 +52,11 @@ Azure authentication uses `DefaultAzureCredential` (e.g. `az login`).
 
 Last verified: **23 passed** (2026-10-25; 11 ingestion + 4 spark packaging + 8 state-backend). `tests/integration/` is currently empty.
 
-## 3. Ingestion CLI
+## 4. Ingestion CLI
 
-> **Warning:** these commands call the real OpenAQ API and write to real ADLS storage.
+> **Warning:** these commands call the real OpenAQ API and write to local `./landing` by
+> default. The UC Raw volume is landed only after the user uploads that tree through the
+> Catalog UI and runs `spark/06_stage_landing.ipynb` inside Databricks compute.
 > Check `config/source_scope.py` (4 locations, 12 sensors) and `config/backfill.py`
 > (2025-02-18 → 2026-10-01 UTC, 7-day windows) before running anything.
 
@@ -52,9 +78,32 @@ Safety properties (unit-tested):
   upload propagates and leaves no checkpoint (rerun resumes the window).
 - The incremental watermark advances **only after** a successful landing; the default 2 h
   overlap rechecks recent observations, and Silver deduplicates replays.
-- Raw objects are never overwritten (`create_file` only); each file wraps the verbatim API
-  page in a `{"source_payload", "ingestion"}` envelope whose lineage carries a sha256 of the
-  source payload, verifiable via `RawWriter.verify_json(path)`.
+- Raw objects are never overwritten (`overwrite=False`); each file wraps the verbatim API page
+  in a `{"source_payload", "ingestion"}` envelope whose lineage carries a sha256 of the source
+  payload.
+
+Standing G0 Raw visibility gate: after **any** writer change, land one fresh bounded window,
+run `spark/06_stage_landing.ipynb`, and assert from the notebook/Spark side that
+`dbutils.fs.ls("/Volumes/...")` shows the file before running transformations. Never verify a
+write through the same API family that performed it.
+
+### Local-mode landing procedure (Free Edition fallback)
+
+1. Run the bounded ingestion command with `OPENAQ_LANDING_MODE=local` (the default). The
+   contract envelope is written to `./landing/<relative contract path>` with a unique filename;
+   the CLI prints its absolute path, `batch_id`, and source-payload `sha256`.
+2. In the Databricks Catalog UI, upload the complete local `landing/` tree to the agreed staging
+   location, preserving the relative `measurements/...` (or metadata) paths. Do not use public
+   DBFS root or assume a Files API upload is Spark-visible on Free Edition.
+3. In Databricks, Run All `spark/06_stage_landing.ipynb`. It reads the uploaded staging files,
+   writes scheme-less `/Volumes/workspace/raw/openaq_landing/<same relative path>` with
+   `dbutils.fs.put(..., overwrite=False)`, skips existing destinations, verifies each with
+   `dbutils.fs.ls`, and prints the envelope `batch_id` plus landed staging paths.
+4. Run the G0 check with `dbutils.fs.ls` and `dbutils.fs.head`. Only after the files are visible
+   there may the 03 → 04 → 05 notebooks be run. Workspace staging cleanup is a local/UI task;
+   notebook compute must not attempt to delete it.
+5. If the local file, UI upload, or destination visibility check fails, stop. Do not re-fetch or
+   mark a new checkpoint while investigating the transport.
 
 State: `.state/backfill.json` and `.state/watermarks.json` are **local, single-process
 only** — not concurrency-safe. Do not commit them (`.gitignore` covers `.state/`).
@@ -66,20 +115,69 @@ Durability is selectable via the state backend (`ingestion/state_backends.py`, D
   survive a laptop/host failure. The prefix is created on first write; write failures
   propagate (a checkpoint is never silently lost). State files are overwritten in place —
   they are checkpoints, not immutable Raw. Uses `DefaultAzureCredential` like `RawWriter`.
-  **Exercised in a real containerized run 2026-10-26** (see §7): batch
+  **Exercised in a real containerized run 2026-10-26** (see §8): batch
   `backfill_20261026T092318Z_f85a1445`. Note the cloud state file is **independent of
   local `.state/` history** — it started empty on first volume-mode run; do not assume
   local checkpoints exist in the cloud store.
 
-### Re-landing a backfill window (verified end-to-end 2026-10-25)
+### Demonstrating an incremental bounded run
+
+Pick a new one-day window only after checking `.state/backfill.json`; for the standard
+sensor, use `2026-09-03T00:00:00+00:00` → `2026-09-04T00:00:00+00:00` if that key is absent.
+Use local state for this demonstration and never echo the API key:
+
+```bash
+docker run --rm \
+  -e OPENAQ_API_KEY \
+  -e AZURE_STORAGE_ACCOUNT_NAME \
+  -e OPENAQ_STATE_BACKEND=local \
+  openaq-ingestion:dev backfill --sensor-id 12234787 \
+  --start=2026-09-03T00:00:00+00:00 \
+  --end=2026-09-04T00:00:00+00:00
+```
+
+Before the Databricks UI run, record baseline counts from `workspace.silver.measurements`,
+`workspace.silver.measurement_quality_events`, `workspace.gold.fact_measurements`, and
+`workspace.gold.publish_watermark`. Run notebook 06, then verify the new partition with `dbutils.fs.ls` and
+`dbutils.fs.head`; the head must show the Raw ingestion envelope and `.state/backfill.json`
+must contain the new `batch_id`.
+
+Run All on the thin UI notebooks 03 → 04 → 05. Record the Raw contract gate, persisted
+counts, `publish_watermark` (`status='VALIDATED'`), and all `bi_*` view counts. Rerun 04 and
+05 and require identical data counts and view counts; only the watermark timestamp and new
+`etl_run_audit` row may change. Reconcile with:
+
+```text
+N_raw_landed = N_silver_delta = N_fact_delta
+```
+
+Stop on any mismatch. Do not use `databricks bundle deploy` or `databricks bundle run` while
+the documented Free Edition jobs API block remains open.
+
+### Power BI connection
+
+Power BI connects only to `{catalog}.{gold_schema}.bi_fact_measurements`,
+`bi_dim_date`, `bi_dim_sensor`, `bi_dim_parameter`, `bi_dim_location`, and
+`bi_quality_events`. The freshness tile reads
+`{catalog}.{gold_schema}.publish_watermark`, requiring `status='VALIDATED'`; the Gold runner
+writes `etl_run_audit` and `publish_watermark` last, after all asserts pass. No report should
+connect directly to the underlying tables or bypass the watermark.
+
+### Re-landing a backfill window (volume-native procedure)
 
 1. **Inspect the partition first** — never delete blind; a wider conforming window file may
    already cover the target window. List and read via `dbutils` in the Databricks UI (the
    authoritative path to the Raw volume):
    ```python
    dbutils.fs.ls("/Volumes/workspace/raw/openaq_landing/measurements/sensor_id=<id>/year=<y>/month=<m>/day=<d>/")
-   print(dbutils.fs.head("<file path>"))  # conforming files wrap source_payload in an ingestion envelope with batch_id
+   print(dbutils.fs.head("/Volumes/workspace/raw/openaq_landing/measurements/.../page_0001_<file>.json", 300))
    ```
+   Volume paths are always scheme-less `/Volumes/...` paths. `dbfs:` is the legacy DBFS
+   namespace and must never be used for UC volume operations.
+
+   G0 landing verification is notebook-side: after landing, the user must verify with
+   `dbutils.fs.ls`/`dbutils.fs.head` or Spark. Do not treat a writer-side Files API read as
+   proof that Spark can see the volume object.
    If a conforming file's `window_start`/`window_end` already covers the target window
    (verify per-day record counts inside `source_payload.results`), **do not re-land** —
    skip to step 3.
@@ -93,21 +191,19 @@ Durability is selectable via the state backend (`ingestion/state_backends.py`, D
    ```
    The writer lands the contract envelope into the same partition with a fresh `batch_id`,
    and commits the checkpoint only after all pages land.
-3. **Delete only the non-conforming files** via `dbutils.fs.rm` (exact paths, `recurse=True`
-   only for a directory you have fully listed; keep conforming ones):
+3. **Delete only the non-conforming files** via the Databricks volume API (exact paths; keep
+   conforming ones):
    ```python
    dbutils.fs.rm("/Volumes/workspace/raw/openaq_landing/measurements/.../page_0001_<bad>.json")
    ```
-   **Do not use the ADLS SDK (`RawWriter.filesystem.delete_file`) for deletions** — observed
-   2026-10-24/25: a `delete_file` call that reported success left the target in place (the
-   Sep 28 test file survived; it was removed only via `dbutils.fs.rm` on 2026-10-25). Treat
-   SDK deletion as unreliable for this workflow; verify every deletion with a fresh listing.
+   **Do not use the ADLS SDK for Raw transport or cleanup.** The ADLS Raw tree is retired;
+   verify every volume deletion with a fresh Databricks listing.
 4. **Correct the checkpoint**: point the window's `.state/backfill.json` entry at the
    `batch_id` that actually covers it in Raw (or keep the fresh one from step 2).
 5. **Rerun the contract cell** in `spark/03_raw_to_bronze.ipynb`; expect
    `Raw measurement contract validation passed` (verified 2026-10-25).
 
-## 4. Databricks transformation runs
+## 5. Databricks transformation runs
 
 Current state: notebooks `spark/03_raw_to_bronze.ipynb`, `04_bronze_to_silver.ipynb`,
 `05_silver_to_gold.ipynb` run in the Dev workspace. The full 03→04→05 chain ran green
@@ -219,7 +315,7 @@ against the pre-refactor notebook logic (exported copies are the reference).**
 Promote the same tested artifact Dev → UAT → Prod only after checks pass. Never print or
 commit tokens; authenticate via the `openaq` profile above.
 
-## 5. Retry and recovery
+## 6. Retry and recovery
 
 | Failure | Behavior | Recovery |
 |---|---|---|
@@ -231,7 +327,7 @@ commit tokens; authenticate via the `openaq` profile above.
 | Gold dim rerun | MERGE-only; Type 1 updates, dim_date inserts, SCD2 hash-gated | safe to rerun; IDENTITY SKs stable |
 | Notebook 04 fails at destination print/persist | pre-fix notebook had an undefined `SILVER_ROOT` | fixed 2026-10-24 — Silver writes managed `workspace.silver.*` tables; redeploy the notebook |
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---|---|---|
@@ -242,7 +338,7 @@ commit tokens; authenticate via the `openaq` profile above.
 | Measurement counts drop Bronze→Silver | replay dedup + flagged-null split | expect 2,712 dropped + 112 split (historical run); verify reconciliation prints |
 | Gold SCD2 shows no history | no attribute change has occurred yet | historical versions appear only after a tracked change; current state 4/0 is valid |
 
-## 7. Docker (ingestion runtime image)
+## 8. Docker (ingestion runtime image)
 
 `Dockerfile` packages only the ingestion application (`config/` + `ingestion/`) on
 `python:3.11-slim`, non-root (`USER app`), entrypoint `python -m ingestion.pipeline`.
@@ -302,7 +398,7 @@ durability use `OPENAQ_STATE_BACKEND=volume` (above; DECISIONS #27).
 build context; verify with `docker history openaq-ingestion:dev` — the only COPY layers are
 `requirements.txt`, `config/`, `ingestion/`. No `docker push` (no registry decided yet).
 
-## 8. Terraform (observe-only skeleton)
+## 9. Terraform (observe-only skeleton)
 
 `infra/terraform/` declares the existing Azure footprint as **data sources only** — nothing
 is managed, `plan` makes zero infrastructure changes. Verified 2026-10-25 (Terraform
@@ -323,7 +419,7 @@ terraform plan -var-file=environments/dev.tfvars -input=false
 out until each resource's live configuration is fully modelled in HCL and reviewed — see
 `infra/terraform/README.md` and DECISIONS #28.
 
-## 9. Git safety
+## 10. Git safety
 
 - Never commit `.env`, `.state/`, `.venv/`, raw data, credentials.
 - Review `git status` / `git diff --cached` before every commit; this working folder is not

@@ -9,6 +9,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run the Raw to Bronze transformation")
     parser.add_argument("--package-root", required=True, help="Bundle files path containing the spark package")
     parser.add_argument("--catalog", default="workspace")
+    parser.add_argument("--bronze-schema", default="bronze")
+    parser.add_argument("--silver-schema", default="silver")
+    parser.add_argument("--gold-schema", default="gold")
     parser.add_argument("--raw-root", default=DEFAULT_RAW_ROOT)
     return parser.parse_args(argv)
 
@@ -23,7 +26,9 @@ def main(argv=None):
     from spark.transformations.bronze import build_bronze
 
     spark = SparkSession.builder.getOrCreate()
-    counts = build_bronze(spark, args.raw_root, args.catalog)
+    counts = build_bronze(
+        spark, args.raw_root, args.catalog, bronze_schema=args.bronze_schema
+    )
 
     for table, count in counts.items():
         print(f"{table}: {count:,} rows")

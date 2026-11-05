@@ -1,15 +1,25 @@
 
 import json
 import hashlib
+import os
+import tempfile
 import time
+from configparser import ConfigParser
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from azure.core.exceptions import (ResourceExistsError, ResourceModifiedError, ServiceRequestError)
 from azure.identity import DefaultAzureCredential
 from azure.storage.filedatalake import DataLakeServiceClient
+from databricks.sdk import WorkspaceClient
 
-from config.settings import AZURE_RAW_FILE_SYSTEM, AZURE_STORAGE_ACCOUNT_NAME
+from config.settings import (
+    AZURE_RAW_FILE_SYSTEM,
+    AZURE_STORAGE_ACCOUNT_NAME,
+    OPENAQ_LANDING_MODE,
+    OPENAQ_RAW_VOLUME_ROOT,
+)
 from ingestion.state_backends import LocalStateBackend, select_state_backend
 
 
@@ -92,6 +102,104 @@ class RawWriter:
         ).encode("utf-8")
 
         return hashlib.sha256(payload_data).hexdigest() == envelope["ingestion"]["sha256"]
+
+
+def validate_volume_root(root: str) -> str:
+    """Validate and normalize the UC volume root used for Raw landing."""
+    if root.startswith("dbfs:"):
+        raise ValueError("UC volume paths must be scheme-less; dbfs: is the legacy DBFS namespace")
+    normalized = root.rstrip("/")
+    segments = normalized.removeprefix("/").split("/")
+    if (
+        not normalized.startswith("/Volumes/")
+        or len(segments) < 4
+        or segments[-1] != "openaq_landing"
+        or any(part in {"", ".", ".."} for part in segments)
+    ):
+        raise ValueError("OPENAQ_RAW_VOLUME_ROOT must end at /openaq_landing under /Volumes/<catalog>/<schema>")
+    return normalized
+
+
+def validate_dbfs_staging_root(root: str) -> str:
+    """Validate the DBFS namespace used only as a cross-client staging area."""
+    normalized = root.rstrip("/")
+    if (
+        not normalized.startswith("dbfs:/")
+        or len(normalized.split("/")) < 2
+        or any(part in {"", ".", ".."} for part in normalized[6:].split("/"))
+    ):
+        raise ValueError("staging root must be an absolute dbfs:/... path")
+    return normalized
+
+
+class VolumeRawWriter:
+    """Write immutable Raw envelopes locally or directly to a UC volume."""
+
+    def __init__(
+        self,
+        volume_root=OPENAQ_RAW_VOLUME_ROOT,
+        landing_mode=None,
+        local_root="landing",
+        workspace_client=None,
+    ):
+        self.volume_root = validate_volume_root(volume_root)
+        self.landing_mode = (landing_mode or os.getenv("OPENAQ_LANDING_MODE", OPENAQ_LANDING_MODE)).strip().lower()
+        if self.landing_mode not in {"local", "volume"}:
+            raise ValueError("OPENAQ_LANDING_MODE must be 'local' or 'volume'")
+        self.local_root = Path(local_root)
+        self.workspace = None
+        if self.landing_mode == "volume":
+            if workspace_client is not None:
+                self.workspace = workspace_client
+            else:
+                profile = os.getenv("DATABRICKS_CONFIG_PROFILE")
+                config_path = os.path.expanduser("~/.databrickscfg")
+                if not profile and os.path.exists(config_path):
+                    config = ConfigParser()
+                    config.read(config_path)
+                    if config.has_section("openaq"):
+                        profile = "openaq"
+                self.workspace = WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+
+    def write_json(self, payload, directory_path, entity, batch_id, file_prefix, lineage=None):
+        ingested_at = datetime.now(timezone.utc)
+        file_id = f"{file_prefix}_{ingested_at:%Y%m%dT%H%M%S%fZ}_{uuid4().hex[:8]}"
+        relative_directory = directory_path.strip("/")
+        relative_path = f"{relative_directory}/{file_id}.json"
+
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        checksum = hashlib.sha256(data).hexdigest()
+        envelope = {
+            "source_payload": payload,
+            "ingestion": {
+                "source": "openaq",
+                "entity": entity,
+                "batch_id": batch_id,
+                "ingested_at": ingested_at.isoformat(),
+                "sha256": checksum,
+                "size_bytes": len(data),
+                "source_file": f"{file_id}.json",
+                **(lineage or {}),
+            },
+        }
+        envelope_bytes = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+        if self.landing_mode == "local":
+            destination = (self.local_root / relative_path).resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as output:
+                output.write(envelope_bytes)
+            absolute_path = str(destination)
+            print(
+                f"LANDED LOCAL: path={absolute_path} batch_id={batch_id} "
+                f"sha256={checksum}"
+            )
+            return absolute_path
+
+        destination = f"{self.volume_root}/{relative_path}"
+        self.workspace.files.upload(destination, envelope_bytes, overwrite=False)
+
+        return destination
 
 
 class _JsonState:    # Checkpoint persistence delegated to a pluggable backend; unsuitable for concurrent distributed writers.

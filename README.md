@@ -12,6 +12,7 @@ with identical results on 2026-10-25 and is packaged as a Databricks Asset Bundl
 (`databricks.yml`, job `openaq_medallion_pipeline`) — bundle validated, job execution
 currently blocked by the workspace org state. Airflow orchestration and CI validation are
 implemented locally; downstream serving and cloud Airflow execution remain pending.
+CI is 2/3 green; Bundle validation is explicitly platform-blocked by the Free Edition org API gate.
 
 ## Ingestion layout
 

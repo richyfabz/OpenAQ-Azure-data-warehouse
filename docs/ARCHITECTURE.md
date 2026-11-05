@@ -9,8 +9,9 @@ Last audited: 2026-10-23 against the live repository and saved notebook outputs.
 ```text
 OpenAQ API v3
   └─> Python ingestion CLI (ingestion/ + config/)        [implemented, unit-tested]
-        └─> Immutable Raw JSON envelopes in ADLS Gen2 (container `raw`)
-              └─> Databricks notebook 03: Raw → Bronze   [end-to-end-verified 2026-10-25]
+        └─> local `./landing` (Free Edition fallback)    [implemented]
+              └─> Catalog UI upload → notebook 06: stage → UC Raw volume
+                    └─> Databricks notebook 03: Raw → Bronze [contract gate]
                     └─> notebook 04: Bronze → Silver     [end-to-end-verified 2026-10-25]
                           └─> notebook 05: Silver → Gold [end-to-end-verified 2026-10-25, dims + fact]
                                 └─> analytics / Power BI [planned]
@@ -24,13 +25,24 @@ implemented/smoke-tested), infrastructure as code (Terraform, observe-only skele
 Databricks Bundle deployment (validated; job creation blocked by org state) are in progress
 — see `docs/IMPLEMENTATION_STATUS.md`.
 
+Airflow provides the orchestration boundary: it coordinates a Dockerized bounded ingestion run
+and then calls the bundle-deployed Databricks medallion job through the workspace API. It owns
+ordering, retries, timeouts and failure reporting only; extraction stays in `ingestion/`, while
+Bronze/Silver/Gold logic stays in `spark/` and Databricks. The Databricks API integration remains
+gated by the documented Free Edition org block.
+
+Serving has a separate trust boundary: Power BI reads the Gold `bi_*` views and the
+`publish_watermark` freshness record only. The Gold runner writes the audit row and watermark
+last, after all validation asserts pass, so analytics cannot advance to a new publish state
+through an unvalidated path.
+
 ## Component responsibilities
 
 | Component | Path | Responsibility | Status |
 |---|---|---|---|
 | API client | `ingestion/client.py` | Authenticated OpenAQ v3 requests, retries/backoff, full-page pagination | implemented |
 | Ingestion pipeline | `ingestion/pipeline.py` | Metadata landing, bounded backfill windows, incremental watermark ingestion, CLI | implemented |
-| Raw storage | `ingestion/storage.py` | ADLS Gen2 Raw writer (immutable `{"source_payload", "ingestion"}` envelope objects, sha256-verifiable), checkpoint/watermark state | implemented |
+| Raw storage | `ingestion/storage.py`, `spark/06_stage_landing.ipynb` | CLI writes immutable envelopes locally by default; the user uploads them through Catalog UI and notebook 06 lands them into the Spark-visible UC volume | implemented; local-mode Free Edition fallback |
 | State backends | `ingestion/state_backends.py` | Pluggable checkpoint persistence: `LocalStateBackend` (default) / `VolumeStateBackend` (`OPENAQ_STATE_BACKEND`) | implemented, unit-tested |
 | Settings | `config/settings.py` | Environment-driven settings; no secrets in source | implemented |
 | Source scope | `config/source_scope.py` | Selected locations (4) and sensors (12) | implemented |
@@ -48,7 +60,7 @@ Databricks Bundle deployment (validated; job creation blocked by org state) are 
 
 | Layer | Location | Form | Evidence |
 |---|---|---|---|
-| Raw | ADLS Gen2 account `openaqdataplatform`, container `raw`; mounted in Databricks as UC volume `/Volumes/workspace/raw/openaq_landing` | Immutable JSON envelope files (`source_payload` + in-file `ingestion` lineage) | notebook 03 config cells; writer in `ingestion/storage.py` |
+| Raw | local `./landing` → Catalog UI upload → UC volume `/Volumes/workspace/raw/openaq_landing` | Immutable JSON envelope files (`source_payload` + in-file `ingestion` lineage) | CLI writes local files; notebook 06 lands into the Spark-visible volume; contract gate reads the volume |
 | Bronze | Unity Catalog `workspace.bronze.{measurements,countries,locations,sensors,parameters}` | Managed Delta tables, overwrite mode | notebook 03 saved outputs |
 | Silver | `workspace.silver.{countries,locations,sensors,parameters,measurements,measurement_quality_events}` | Managed Delta tables (UC), same contract as Bronze | notebooks 04/05; DECISIONS #25; verified 2026-10-25 |
 | Gold | `workspace.gold.dim_*` + `workspace.gold.fact_measurements` | Managed Delta tables, MERGE-only writes; catalog pinned via explicit `CATALOG = "workspace"` | notebook 05; DECISIONS #26; verified 2026-10-25 |
@@ -57,9 +69,11 @@ Resolved 2026-10-24/25 (both runs of the full chain green on 2026-10-25):
 1. **Catalog naming** — all layers run under catalog `workspace`; notebook 05 pins
    `CATALOG` explicitly instead of relying on `current_catalog()`.
 2. **Managed vs path tables** — Bronze, Silver and Gold are all managed UC tables.
-3. Raw is specified as ADLS Gen2; the notebooks read it through a UC volume mount, which is
-   the supported Databricks access pattern, but the volume-to-container binding should be
-   verified against the storage account above.
+3. Raw uses a local stage-and-land boundary because Free Edition local-client volume writes are
+   not Spark-visible: the CLI writes `./landing`, the user uploads through Catalog UI, notebook
+   06 copies into the UC volume, and notebook 03 reads that same volume. Production runs should
+   execute the writer in-platform as a serverless bundle job task once the organization API block
+   lifts; paid tiers may enable direct Files-API volume writes behind a flag.
 
 ## Layer semantics
 
@@ -83,7 +97,10 @@ Resolved 2026-10-24/25 (both runs of the full chain green on 2026-10-25):
 
 ```text
 repo (Git source of truth)
-  └─> databricks bundle validate / deploy        [validated 2026-10-25; job creation blocked — org run-triggering disabled]
+  └─> Airflow (sole scheduler)
+        ├─> Docker `openaq-ingestion:dev` → OpenAQ API → ADLS Raw
+        └─> Databricks API → bundle job `openaq_medallion_pipeline`
+              └─> databricks bundle validate / deploy [job creation blocked — org API disabled]
         └─> /Workspace/.../.bundle/openaq-databricks/dev/files/spark/   [synced package]
               └─> job openaq_medallion_pipeline: bronze → silver → gold spark_python_tasks [serverless]
 ```

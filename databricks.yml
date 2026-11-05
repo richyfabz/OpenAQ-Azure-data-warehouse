@@ -13,6 +13,15 @@ variables:
   catalog:
     description: Unity Catalog holding the bronze/silver/gold schemas (override per environment)
     default: workspace
+  bronze_schema:
+    description: Bronze schema for the selected environment
+    default: bronze
+  silver_schema:
+    description: Silver schema for the selected environment
+    default: silver
+  gold_schema:
+    description: Gold schema for the selected environment
+    default: gold
 
 resources:
   jobs:
@@ -31,6 +40,9 @@ resources:
             parameters:
               - --package-root=${workspace.file_path}
               - --catalog=${var.catalog}
+              - --bronze-schema=${var.bronze_schema}
+              - --silver-schema=${var.silver_schema}
+              - --gold-schema=${var.gold_schema}
         - task_key: silver
           environment_key: default
           depends_on:
@@ -40,6 +52,9 @@ resources:
             parameters:
               - --package-root=${workspace.file_path}
               - --catalog=${var.catalog}
+              - --bronze-schema=${var.bronze_schema}
+              - --silver-schema=${var.silver_schema}
+              - --gold-schema=${var.gold_schema}
         - task_key: gold
           environment_key: default
           depends_on:
@@ -49,9 +64,19 @@ resources:
             parameters:
               - --package-root=${workspace.file_path}
               - --catalog=${var.catalog}
+              - --bronze-schema=${var.bronze_schema}
+              - --silver-schema=${var.silver_schema}
+              - --gold-schema=${var.gold_schema}
 
 targets:
   dev:
     default: true
     workspace:
       profile: openaq
+  uat:
+    workspace:
+      profile: openaq
+    variables:
+      bronze_schema: uat_bronze
+      silver_schema: uat_silver
+      gold_schema: uat_gold

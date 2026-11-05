@@ -107,6 +107,32 @@ Foreign keys (all zero-orphan, asserted on every run): `date_key` → `dim_date`
 is documented out of scope). Write path: MERGE on the grain business key — unchanged facts
 untouched, corrected values update in place, new windows insert; idempotent across reruns.
 
+### Publish gate and Power BI contract
+
+The Gold runner writes these control tables only after all Gold assertions pass. Counts and
+parameters are stored as JSON strings so the audit record remains self-describing across
+environment schemas:
+
+| Table | Columns | Semantics |
+|---|---|---|
+| `{catalog}.{gold_schema}.etl_run_audit` | `run_id STRING`, `run_finished_at_utc TIMESTAMP`, `bronze_row_counts STRING`, `silver_row_counts STRING`, `gold_row_counts STRING`, `assert_summary STRING`, `parameters STRING` | Append-only record of a fully validated Gold run; no row is appended on an assertion failure |
+| `{catalog}.{gold_schema}.publish_watermark` | `watermark_key STRING`, `last_published_at_utc TIMESTAMP`, `last_run_id STRING`, `fact_count BIGINT`, `status STRING` | Singleton freshness gate maintained by MERGE; valid rows use `watermark_key='singleton'` and `status='VALIDATED'` |
+
+Power BI consumes only these views after the publish gate has passed:
+
+| View | Source | Consumption contract |
+|---|---|---|
+| `bi_fact_measurements` | `fact_measurements` | analytical fact |
+| `bi_dim_date` | `dim_date` | date dimension |
+| `bi_dim_sensor` | `dim_sensor` | sensor dimension |
+| `bi_dim_parameter` | `dim_parameter` | parameter dimension |
+| `bi_dim_location` | current rows of `dim_location` | current location dimension |
+| `bi_quality_events` | Silver `measurement_quality_events` | flagged-null quality evidence |
+
+Power BI connects **only** to `bi_*` views and reads `publish_watermark` for the freshness
+tile. A live incremental run and view-count evidence remain pending because the local
+`openaq-ingestion:dev` image is unavailable and the Databricks org API is blocked.
+
 ## Reconciliation chain
 
 Raw measurement files (541 after the documented cleanup of non-conforming landings)

@@ -8,7 +8,9 @@ builds, merges, and validates ``fact_measurements`` at grain
 ``(sensor_id, observed_from_utc, observed_to_utc)``.
 """
 
-from datetime import datetime
+import json
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -22,6 +24,58 @@ SILVER_DATASETS = (
     "measurements",
     "measurement_quality_events",
 )
+
+BRONZE_DATASETS = (
+    "countries",
+    "locations",
+    "sensors",
+    "parameters",
+    "measurements",
+)
+
+
+def build_etl_run_audit_row(
+    run_id: str,
+    run_finished_at_utc: str,
+    bronze_row_counts: dict[str, int],
+    silver_row_counts: dict[str, int],
+    gold_row_counts: dict[str, int],
+    assert_summary: dict[str, bool],
+    catalog: str,
+    bronze_schema: str,
+    silver_schema: str,
+    gold_schema: str,
+) -> dict:
+    """Build the immutable, JSON-serializable audit payload without Spark."""
+    return {
+        "run_id": run_id,
+        "run_finished_at_utc": run_finished_at_utc,
+        "bronze_row_counts": dict(bronze_row_counts),
+        "silver_row_counts": dict(silver_row_counts),
+        "gold_row_counts": dict(gold_row_counts),
+        "assert_summary": dict(assert_summary),
+        "parameters": {
+            "catalog": catalog,
+            "bronze_schema": bronze_schema,
+            "silver_schema": silver_schema,
+            "gold_schema": gold_schema,
+        },
+    }
+
+
+def build_publish_watermark_payload(
+    run_id: str,
+    last_published_at_utc: str,
+    fact_count: int,
+) -> dict:
+    """Build the single-row publish watermark payload without Spark."""
+    return {
+        "watermark_key": "singleton",
+        "last_published_at_utc": last_published_at_utc,
+        "last_run_id": run_id,
+        "fact_count": fact_count,
+        "status": "VALIDATED",
+    }
 
 
 def _read_silver(spark: SparkSession, silver_namespace: str) -> dict[str, DataFrame]:
@@ -997,7 +1051,124 @@ def _validate_persisted_fact(
     return persisted_count
 
 
-def build_gold(spark: SparkSession, catalog: str = "workspace") -> dict[str, int]:
+def _count_namespace_tables(
+    spark: SparkSession,
+    namespace: str,
+    table_names: tuple[str, ...],
+) -> dict[str, int]:
+    return {
+        name: spark.table(f"{namespace}.`{name}`").count()
+        for name in table_names
+    }
+
+
+def _create_power_bi_views(
+    spark: SparkSession,
+    gold_namespace: str,
+    silver_namespace: str,
+) -> None:
+    """Expose only validated Gold tables plus flagged Silver quality evidence."""
+    view_sources = {
+        "bi_fact_measurements": f"{gold_namespace}.`fact_measurements`",
+        "bi_dim_date": f"{gold_namespace}.`dim_date`",
+        "bi_dim_sensor": f"{gold_namespace}.`dim_sensor`",
+        "bi_dim_parameter": f"{gold_namespace}.`dim_parameter`",
+        "bi_dim_location": (
+            f"(SELECT * FROM {gold_namespace}.`dim_location` WHERE is_current)"
+        ),
+        "bi_quality_events": f"{silver_namespace}.`measurement_quality_events`",
+    }
+
+    for view_name, source in view_sources.items():
+        spark.sql(
+            f"CREATE OR REPLACE VIEW {gold_namespace}.`{view_name}` AS "
+            f"SELECT * FROM {source}"
+        )
+
+
+def _persist_publish_gate(
+    spark: SparkSession,
+    gold_namespace: str,
+    audit_row: dict,
+    watermark_payload: dict,
+) -> None:
+    """Write audit then singleton watermark after every validation has passed."""
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {gold_namespace}.`etl_run_audit` (
+            run_id STRING,
+            run_finished_at_utc TIMESTAMP,
+            bronze_row_counts STRING,
+            silver_row_counts STRING,
+            gold_row_counts STRING,
+            assert_summary STRING,
+            parameters STRING
+        ) USING DELTA
+    """)
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {gold_namespace}.`publish_watermark` (
+            watermark_key STRING,
+            last_published_at_utc TIMESTAMP,
+            last_run_id STRING,
+            fact_count BIGINT,
+            status STRING
+        ) USING DELTA
+    """)
+
+    audit_payload = {
+        "run_id": audit_row["run_id"],
+        "run_finished_at_utc": audit_row["run_finished_at_utc"],
+        "bronze_row_counts": json.dumps(audit_row["bronze_row_counts"], sort_keys=True),
+        "silver_row_counts": json.dumps(audit_row["silver_row_counts"], sort_keys=True),
+        "gold_row_counts": json.dumps(audit_row["gold_row_counts"], sort_keys=True),
+        "assert_summary": json.dumps(audit_row["assert_summary"], sort_keys=True),
+        "parameters": json.dumps(audit_row["parameters"], sort_keys=True),
+    }
+    audit_df = spark.createDataFrame([audit_payload]).select(
+        "run_id",
+        F.to_timestamp("run_finished_at_utc").alias("run_finished_at_utc"),
+        "bronze_row_counts",
+        "silver_row_counts",
+        "gold_row_counts",
+        "assert_summary",
+        "parameters",
+    )
+    audit_df.write.mode("append").insertInto(f"{gold_namespace}.`etl_run_audit`")
+
+    watermark_df = spark.createDataFrame([watermark_payload]).select(
+        "watermark_key",
+        F.to_timestamp("last_published_at_utc").alias("last_published_at_utc"),
+        "last_run_id",
+        F.col("fact_count").cast("long").alias("fact_count"),
+        "status",
+    )
+    watermark_df.createOrReplaceTempView("src_publish_watermark")
+    spark.sql(f"""
+        MERGE INTO {gold_namespace}.`publish_watermark` AS target
+        USING src_publish_watermark AS source
+        ON target.watermark_key = source.watermark_key
+        WHEN MATCHED THEN UPDATE SET
+            target.last_published_at_utc = source.last_published_at_utc,
+            target.last_run_id = source.last_run_id,
+            target.fact_count = source.fact_count,
+            target.status = source.status
+        WHEN NOT MATCHED THEN INSERT (
+            watermark_key, last_published_at_utc, last_run_id, fact_count, status
+        ) VALUES (
+            source.watermark_key, source.last_published_at_utc,
+            source.last_run_id, source.fact_count, source.status
+        )
+    """)
+
+    print("Publish gate persisted: etl_run_audit and publish_watermark")
+
+
+def build_gold(
+    spark: SparkSession,
+    catalog: str = "workspace",
+    bronze_schema: str = "bronze",
+    silver_schema: str = "silver",
+    gold_schema: str = "gold",
+) -> dict[str, int]:
     """Build and persist the Gold layer from persisted Silver tables.
 
     Returns a mapping of each written Gold table name to its persisted
@@ -1005,8 +1176,9 @@ def build_gold(spark: SparkSession, catalog: str = "workspace") -> dict[str, int
     """
     CATALOG = catalog
 
-    SILVER_NAMESPACE = f"{CATALOG}.silver"  # Silver reads come from the managed tables written by notebook 04
-    GOLD_NAMESPACE = f"{CATALOG}.gold"      # Gold shares the Bronze/Silver catalog convention
+    BRONZE_NAMESPACE = f"{CATALOG}.{bronze_schema}"
+    SILVER_NAMESPACE = f"{CATALOG}.{silver_schema}"  # Silver reads come from managed tables
+    GOLD_NAMESPACE = f"{CATALOG}.{gold_schema}"      # Gold destination for the environment
 
     silver = _read_silver(spark, SILVER_NAMESPACE)
 
@@ -1017,7 +1189,7 @@ def build_gold(spark: SparkSession, catalog: str = "workspace") -> dict[str, int
     _validate_dimension_contracts(silver)
 
     # Pin Gold to the configured catalog so it never drifts with the session default.
-    gold_namespace = f"`{CATALOG}`.`gold`"
+    gold_namespace = f"`{CATALOG}`.`{gold_schema}`"
 
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {gold_namespace}")
 
@@ -1051,5 +1223,40 @@ def build_gold(spark: SparkSession, catalog: str = "workspace") -> dict[str, int
     counts["fact_measurements"] = _validate_persisted_fact(
         spark, gold_namespace, fact_count, dim_sensor, dim_parameter, dim_location, dim_date
     )
+
+    # Everything above is the validation boundary. The publish surface and its
+    # freshness records are changed only after every existing assertion passes.
+    bronze_row_counts = _count_namespace_tables(spark, BRONZE_NAMESPACE, BRONZE_DATASETS)
+    silver_row_counts = _count_namespace_tables(spark, SILVER_NAMESPACE, SILVER_DATASETS)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{uuid4().hex[:8]}"
+    run_finished_at_utc = datetime.now(timezone.utc).isoformat()
+    assert_summary = {
+        "input_schema": True,
+        "dimension_contracts": True,
+        "dimension_persistence": True,
+        "location_scd2_integrity": True,
+        "fact_reconciliation": True,
+        "fact_grain_and_foreign_keys": True,
+    }
+    audit_row = build_etl_run_audit_row(
+        run_id,
+        run_finished_at_utc,
+        bronze_row_counts,
+        silver_row_counts,
+        counts,
+        assert_summary,
+        CATALOG,
+        bronze_schema,
+        silver_schema,
+        gold_schema,
+    )
+    watermark_payload = build_publish_watermark_payload(
+        run_id, run_finished_at_utc, counts["fact_measurements"]
+    )
+
+    # Views are created only after validation and before the final audit /
+    # watermark writes, so a failed validation cannot advance publish state.
+    _create_power_bi_views(spark, gold_namespace, f"`{CATALOG}`.`{silver_schema}`")
+    _persist_publish_gate(spark, gold_namespace, audit_row, watermark_payload)
 
     return counts
