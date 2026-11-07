@@ -13,12 +13,19 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:?Set POSTGRES_DB}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Set AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__WORKERS: "1"
+    AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.session,airflow.api.auth.backend.basic_auth"
+
     # Databricks connection assembled from env; the token is never stored here.
     # DATABRICKS_HOST must be the workspace hostname without https:// prefix.
     AIRFLOW_CONN_DATABRICKS_DEFAULT: databricks://token:${DATABRICKS_TOKEN:?Set DATABRICKS_TOKEN}@${DATABRICKS_HOST:?Set DATABRICKS_HOST}
+    OPENAQ_LANDING_DIR: /opt/airflow/landing
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
+    - ../landing:/opt/airflow/landing
+    - ../orchestration_runs:/opt/airflow/orchestration_runs
 
 services:
   postgres:
@@ -84,6 +91,8 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
+      - ../landing:/opt/airflow/landing
+      - ../orchestration_runs:/opt/airflow/orchestration_runs
       # DockerOperator launches openaq-ingestion:dev on the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
 

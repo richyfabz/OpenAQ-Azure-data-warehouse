@@ -1,0 +1,9 @@
+# Runtime dependencies for python -m ingestion.pipeline only.
+# Keep notebook/Spark development dependencies in requirements.txt.
+azure-core==1.41.0
+azure-identity==1.25.3
+azure-storage-file-datalake==12.25.0
+databricks-sdk==0.160.0
+python-dotenv==1.2.3
+requests==2.34.2
+urllib3==2.8.0

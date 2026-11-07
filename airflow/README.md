@@ -29,10 +29,11 @@ UI: http://localhost:8080 (admin/admin; override host port with
 before first `up`; changing it later invalidates stored connections.
 
 The DAG is `dags/openaq_pipeline.py` (`openaq_pipeline`, `@daily`):
-`ingest` (DockerOperator → `openaq-ingestion:dev ... incremental --end
-<data_interval_end>`) → `transform` (DatabricksRunNowOperator). Ingestion
-credentials (`OPENAQ_API_KEY`, `AZURE_*`) are forwarded from `.env`; the
-scheduler container env is the only place they live.
+`ingest_raw` (DockerOperator → local `./landing`) → `gate_landing` (Raw envelope
+contract check) → `run_transformations` (DatabricksRunNowOperator) →
+`publish_check` (Databricks SQL evidence report). Ingestion credentials
+(`OPENAQ_API_KEY`, `AZURE_*`) are forwarded from `.env`; the scheduler container
+env is the only place they live.
 
 Before the first scheduled run, initialise watermarks once (the `incremental`
 CLI requires them):

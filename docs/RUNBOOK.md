@@ -50,7 +50,50 @@ the documented org API block is lifted. Local parse/list validation does not cal
 .venv/bin/python -m pytest -q
 ```
 
-Last verified: **23 passed** (2026-10-25; 11 ingestion + 4 spark packaging + 8 state-backend). `tests/integration/` is currently empty.
+Last verified: **35 passed** (2026-11-05). `tests/integration/` is currently empty.
+
+## 4. Orchestration demo (Airflow REST API)
+
+This is the API-driven showcase for the end-to-end Airflow DAG. From `airflow/`, start the
+local stack (with the ignored `.env` populated), then return to the repository root to run
+the demo. The script reads `AIRFLOW_USER` and `AIRFLOW_PASSWORD` from the environment and
+never hard-codes or prints them.
+
+```bash
+cd airflow
+docker compose up -d
+cd ..
+export AIRFLOW_USER="${_AIRFLOW_WWW_USER_USERNAME}"
+export AIRFLOW_PASSWORD="${_AIRFLOW_WWW_USER_PASSWORD}"
+python scripts/trigger_pipeline.py
+```
+
+Before triggering a run, create the ingestion API key Variable in Airflow: open Admin →
+Variables, add key `openaq_api_key`, and set its value to the OpenAQ API key. The DAG reads
+this Variable at task setup and passes it only to the ingestion container. Configure
+`OPENAQ_HOST_LANDING_DIR` in `airflow/.env` as the absolute host path to this repository's
+`landing/` directory so DockerOperator can bind the host staging conveyor.
+
+Expected task states are: `ingest_raw` green, `gate_landing` green,
+`run_transformations` red with `PLATFORM-BLOCKED` because of the Databricks organization
+suspension, and `publish_check` red with the same `PLATFORM-BLOCKED (org API suspension,
+support ticket open)` message. The API showcase prints the ingestion envelope `batch_id`
+from the task log and the final orchestration state.
+
+The ingestion container writes its local-mode Raw envelopes into the repository's visible
+`./landing/` directory. This directory is **TRANSIENT**: it is a staging conveyor, must be
+empty between runs, and is never a source-of-truth store. The `gate_landing` task fails if
+any file belongs to another batch, then validates every current-batch JSON envelope,
+checks `ingestion.batch_id`, `source_payload`, and the envelope SHA-256, and prints the
+landed row count. This is the automated orchestration-layer G0 check before transformations.
+
+After the Databricks organization block is lifted, `publish_check` queries
+`workspace.gold.publish_watermark` and `workspace.gold.fact_measurements` through the
+`databricks_default` SQL connection and writes
+`./orchestration_runs/<dag_run_id>_report.json`. The report contains the run ID,
+watermark status, fact count, landed rows, and `gate: "passed"`. An unavailable Databricks
+connection is a clear `PLATFORM-BLOCKED (org API suspension, support ticket open)` task
+failure, not a skipped check.
 
 ## 4. Ingestion CLI
 

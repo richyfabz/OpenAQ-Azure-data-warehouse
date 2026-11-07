@@ -208,6 +208,7 @@ def main(argv=None):             # Route CLI commands to the appropriate Raw ing
     client, writer = OpenAQClient(), VolumeRawWriter()  # Raw writes go through the same Databricks volume read by the contract gate.
     now = datetime.now(timezone.utc)
     batch_id = (f"{args.mode}_{now:%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}")  # Identify each ingestion attempt for Raw lineage and troubleshooting.
+    print(f"BATCH_ID={batch_id}")
 
     if args.mode == "metadata":
         print(
@@ -230,7 +231,6 @@ def main(argv=None):             # Route CLI commands to the appropriate Raw ing
         if args.sensor_id is not None and args.sensor_id not in TARGET_SENSOR_IDS:
             parser.error("Sensor ID is outside the configured source scope")
 
-        print(f"Batch: {batch_id}")
         run_backfill(client, writer, backfill_state(), sensor_ids, start, end, batch_id, BACKFILL_WINDOW_DAYS)
 
     else:
