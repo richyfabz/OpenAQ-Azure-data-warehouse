@@ -59,7 +59,8 @@ services:
           --role Admin --email admin@example.com || true
 
   airflow-webserver:
-    <<: *airflow-common
+    <<: *airflow-common1234
+    
     depends_on:
       postgres:
         condition: service_healthy
