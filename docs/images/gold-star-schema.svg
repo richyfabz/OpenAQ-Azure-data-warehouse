@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1140" viewBox="0 0 1500 1140" role="img" aria-labelledby="title desc"><title id="title">OpenAQ Gold dimensional model</title><desc id="desc">Measurement fact connects to date, sensor, parameter and location. Location connects to country, provider and owner. Arrows point from foreign keys to dimension keys, many to one.</desc><defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#526886"/></marker></defs><rect width="1500" height="1140" fill="#f4f7fc"/><style>text{font-family:Arial,Helvetica,sans-serif}.field{font-size:16px;fill:#203b59}.sub{font-size:16px;fill:#526886}.label{font-size:14px;fill:#384f6b;paint-order:stroke;stroke:#f4f7fc;stroke-width:6px;stroke-linejoin:round}</style><text x="48" y="54" font-family="Arial" font-size="30" font-weight="700" fill="#142b49">OpenAQ · Gold dimensional model</text><text x="48" y="84" class="sub">Managed Delta tables · central measurement star with a snowflaked location branch</text>
+<path d="M530 450H385V275H325" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="345" y="325" class="label">date_key</text>
+<path d="M530 570H390V675H325" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="340" y="610" class="label">sensor_sk</text>
+<path d="M680 662V825" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="695" y="785" class="label">parameter_sk</text>
+<path d="M890 490H1030" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="902" y="475" class="label">location_sk</text>
+<path d="M1100 380V320H1050V282" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="1070" y="307" class="label">country_sk</text>
+<path d="M1320 380V282" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="1328" y="337" class="label">provider_sk</text>
+<path d="M1190 687V825" fill="none" stroke="#526886" stroke-width="2.5" marker-end="url(#a)"/><text x="1205" y="785" class="label">owner_sk (optional)</text>
+<rect x="59" y="190" width="275" height="207" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M50 175l16 -12h275l-16 12Z" fill="#9ab7d0"/><path d="M325 175l16 -12v207l-16 12Z" fill="#7997b4"/><rect x="50" y="175" width="275" height="207" rx="5" fill="white" stroke="#b6c7d9"/><path d="M50 175h275v65h-275Z" fill="#216a9b"/><text x="67" y="203" font-size="21" font-weight="700" fill="white">dim_date</text><text x="67" y="224" font-size="13" fill="#dceaff">Calendar · deterministic key</text>
+<text x="67" y="266" class="field">PK date_key (yyyyMMdd)</text>
+<text x="67" y="291" class="field">full_date · year · quarter</text>
+<text x="67" y="316" class="field">month · month_name</text>
+<text x="67" y="341" class="field">day_of_month · day_of_week</text>
+<text x="67" y="366" class="field">day_name · is_weekend</text>
+<rect x="59" y="575" width="275" height="207" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M50 560l16 -12h275l-16 12Z" fill="#9ab7d0"/><path d="M325 560l16 -12v207l-16 12Z" fill="#7997b4"/><rect x="50" y="560" width="275" height="207" rx="5" fill="white" stroke="#b6c7d9"/><path d="M50 560h275v65h-275Z" fill="#216a9b"/><text x="67" y="588" font-size="21" font-weight="700" fill="white">dim_sensor</text><text x="67" y="609" font-size="13" fill="#dceaff">Type 1 · one row per sensor</text>
+<text x="67" y="651" class="field">PK sensor_sk · BK sensor_id</text>
+<text x="67" y="676" class="field">sensor_name · unit</text>
+<text x="67" y="701" class="field">location_id · parameter_id (BK)</text>
+<text x="67" y="726" class="field">datetime_first_utc</text>
+<text x="67" y="751" class="field">datetime_last_utc</text>
+<rect x="539" y="395" width="360" height="282" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M530 380l16 -12h360l-16 12Z" fill="#9ab7d0"/><path d="M890 380l16 -12v282l-16 12Z" fill="#7997b4"/><rect x="530" y="380" width="360" height="282" rx="5" fill="white" stroke="#b6c7d9"/><path d="M530 380h360v65h-360Z" fill="#7445a4"/><text x="547" y="408" font-size="21" font-weight="700" fill="white">fact_measurements</text><text x="547" y="429" font-size="13" fill="#dceaff">One sensor × one observation interval</text>
+<text x="547" y="471" class="field">PK measurement_sk</text>
+<text x="547" y="496" class="field">FK date_key · sensor_sk</text>
+<text x="547" y="521" class="field">FK parameter_sk · location_sk</text>
+<text x="547" y="546" class="field">sensor_id · parameter_id (BK)</text>
+<text x="547" y="571" class="field">observed_from_utc</text>
+<text x="547" y="596" class="field">observed_to_utc</text>
+<text x="547" y="621" class="field">value · unit · has_flags · interval</text>
+<text x="547" y="646" class="field">batch_id · ingested_at</text>
+<rect x="539" y="840" width="360" height="182" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M530 825l16 -12h360l-16 12Z" fill="#9ab7d0"/><path d="M890 825l16 -12v182l-16 12Z" fill="#7997b4"/><rect x="530" y="825" width="360" height="182" rx="5" fill="white" stroke="#b6c7d9"/><path d="M530 825h360v65h-360Z" fill="#216a9b"/><text x="547" y="853" font-size="21" font-weight="700" fill="white">dim_parameter</text><text x="547" y="874" font-size="13" fill="#dceaff">Type 1 · one row per parameter</text>
+<text x="547" y="916" class="field">PK parameter_sk</text>
+<text x="547" y="941" class="field">BK parameter_id</text>
+<text x="547" y="966" class="field">parameter_name · display_name</text>
+<text x="547" y="991" class="field">description · unit</text>
+<rect x="1039" y="395" width="370" height="307" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M1030 380l16 -12h370l-16 12Z" fill="#9ab7d0"/><path d="M1400 380l16 -12v307l-16 12Z" fill="#7997b4"/><rect x="1030" y="380" width="370" height="307" rx="5" fill="white" stroke="#b6c7d9"/><path d="M1030 380h370v65h-370Z" fill="#216a9b"/><text x="1047" y="408" font-size="21" font-weight="700" fill="white">dim_location</text><text x="1047" y="429" font-size="13" fill="#dceaff">SCD Type 2 · one row per version</text>
+<text x="1047" y="471" class="field">PK location_sk · BK location_id</text>
+<text x="1047" y="496" class="field">FK country_sk · provider_sk</text>
+<text x="1047" y="521" class="field">FK owner_sk</text>
+<text x="1047" y="546" class="field">location_name · timezone</text>
+<text x="1047" y="571" class="field">latitude · longitude</text>
+<text x="1047" y="596" class="field">is_mobile · is_monitor</text>
+<text x="1047" y="621" class="field">attribute_hash</text>
+<text x="1047" y="646" class="field">effective_from · effective_to</text>
+<text x="1047" y="671" class="field">is_current</text>
+<rect x="834" y="165" width="275" height="132" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M825 150l16 -12h275l-16 12Z" fill="#9ab7d0"/><path d="M1100 150l16 -12v132l-16 12Z" fill="#7997b4"/><rect x="825" y="150" width="275" height="132" rx="5" fill="white" stroke="#b6c7d9"/><path d="M825 150h275v65h-275Z" fill="#216a9b"/><text x="842" y="178" font-size="21" font-weight="700" fill="white">dim_country</text><text x="842" y="199" font-size="13" fill="#dceaff">Type 1 · one row per country</text>
+<text x="842" y="241" class="field">PK country_sk · BK country_id</text>
+<text x="842" y="266" class="field">country_code · country_name</text>
+<rect x="1159" y="165" width="290" height="132" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M1150 150l16 -12h290l-16 12Z" fill="#9ab7d0"/><path d="M1440 150l16 -12v132l-16 12Z" fill="#7997b4"/><rect x="1150" y="150" width="290" height="132" rx="5" fill="white" stroke="#b6c7d9"/><path d="M1150 150h290v65h-290Z" fill="#216a9b"/><text x="1167" y="178" font-size="21" font-weight="700" fill="white">dim_provider</text><text x="1167" y="199" font-size="13" fill="#dceaff">Type 1 · one row per provider</text>
+<text x="1167" y="241" class="field">PK provider_sk · BK provider_id</text>
+<text x="1167" y="266" class="field">provider_name</text>
+<rect x="1039" y="840" width="370" height="132" rx="8" fill="#cbd6e4" opacity="0.5"/><path d="M1030 825l16 -12h370l-16 12Z" fill="#9ab7d0"/><path d="M1400 825l16 -12v132l-16 12Z" fill="#7997b4"/><rect x="1030" y="825" width="370" height="132" rx="5" fill="white" stroke="#b6c7d9"/><path d="M1030 825h370v65h-370Z" fill="#216a9b"/><text x="1047" y="853" font-size="21" font-weight="700" fill="white">dim_owner</text><text x="1047" y="874" font-size="13" fill="#dceaff">Type 1 · one row per owner</text>
+<text x="1047" y="916" class="field">PK owner_sk · BK owner_id</text>
+<text x="1047" y="941" class="field">owner_name</text>
+<text x="48" y="1080" class="sub">PK = logical primary key · FK = lookup relationship · BK = source business key · arrows run from many to one</text><text x="48" y="1110" class="sub">Location uses the current version at each Gold run; provider and owner links may be null. Selected columns shown.</text></svg>
